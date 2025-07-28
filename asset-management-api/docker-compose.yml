@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: asset_management_db
+    environment:
+      POSTGRES_DB: asset_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: iloveyou044
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    networks:
+      - asset_network
+
+  adminer:
+    image: adminer
+    container_name: asset_management_adminer
+    restart: always
+    ports:
+      - "8080:8080"
+    networks:
+      - asset_network
+
+volumes:
+  postgres_data:
+
+networks:
+  asset_network:
+    driver: bridge
