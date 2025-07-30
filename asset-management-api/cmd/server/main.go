@@ -8,12 +8,13 @@ import (
 	"asset-management-api/internal/repository/postgres"
 	"asset-management-api/internal/service"
 	"asset-management-api/internal/utils"
-	"fmt"
+
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid" // Add this import
 )
 
 func main() {
@@ -28,6 +29,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
+	log.Printf("Database connected successfully")
 
 	// Initialize JWT utility
 	jwtUtil := utils.NewJWTUtil(cfg.JWT.SecretKey, cfg.JWT.ExpirationTime)
@@ -54,8 +56,8 @@ func main() {
 	// Initialize middleware
 	authMiddleware := middleware.NewAuthMiddleware(jwtUtil)
 
-	// Setup Gin router
-	router := setupRouter(folderHandler, noteHandler, shareHandler, managerHandler, authMiddleware)
+	// Setup Gin router - Pass jwtUtil to setupRouter
+	router := setupRouter(folderHandler, noteHandler, shareHandler, managerHandler, authMiddleware, jwtUtil)
 
 	// Create HTTP server
 	server := &http.Server{
@@ -80,6 +82,7 @@ func setupRouter(
 	shareHandler *handler.ShareHandler,
 	managerHandler *handler.ManagerHandler,
 	authMiddleware *middleware.AuthMiddleware,
+	jwtUtil *utils.JWTUtil, // Add jwtUtil parameter
 ) *gin.Engine {
 	// Set Gin mode
 	gin.SetMode(gin.ReleaseMode) // Change to gin.DebugMode for development
@@ -98,6 +101,21 @@ func setupRouter(
 			"timestamp": time.Now().UTC(),
 			"service":   "asset-management-api",
 			"version":   "1.0.0",
+		})
+	})
+
+	// Test login endpoint for debugging (REMOVE IN PRODUCTION)
+	router.POST("/test/login", func(c *gin.Context) {
+		testUserID := uuid.New()
+		token, err := jwtUtil.GenerateToken(testUserID, "test@example.com", "manager", "testuser")
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to generate token", err.Error())
+			return
+		}
+		utils.SuccessResponse(c, http.StatusOK, "Test token generated", gin.H{
+			"token": token,
+			"user_id": testUserID,
+			"expires_in": "24h",
 		})
 	})
 

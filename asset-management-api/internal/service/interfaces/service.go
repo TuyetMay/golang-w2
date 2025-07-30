@@ -38,3 +38,20 @@ type ManagerService interface {
 	GetTeamAssets(teamID, managerID uuid.UUID) ([]*models.AssetInfo, error)
 	GetUserAssets(targetUserID, managerID uuid.UUID) ([]*models.AssetInfo, error)
 }
+
+// Thêm vào cuối file:
+type TeamService interface {
+	CreateTeam(creatorID uuid.UUID, teamName string, managers []TeamMemberInfo, members []TeamMemberInfo) (*models.Team, error)
+	AddMember(teamID, requestorID, memberID uuid.UUID) error
+	RemoveMember(teamID, requestorID, memberID uuid.UUID) error  
+	AddManager(teamID, requestorID, managerID uuid.UUID) error
+	RemoveManager(teamID, requestorID, managerID uuid.UUID) error
+	GetTeam(teamID, userID uuid.UUID) (*models.Team, error)
+	GetUserTeams(userID uuid.UUID) ([]*models.Team, error)
+}
+
+// Và thêm struct:
+type TeamMemberInfo struct {
+	UserID   string `json:"userId"`
+	UserName string `json:"userName"`
+}

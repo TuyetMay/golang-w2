@@ -49,7 +49,16 @@ type UserRepository interface {
 }
 
 type TeamRepository interface {
+	Create(team *models.Team) error
 	GetByID(teamID uuid.UUID) (*models.Team, error)
 	GetTeamsByManagerID(managerID uuid.UUID) ([]*models.Team, error)
 	GetTeamsByMemberID(memberID uuid.UUID) ([]*models.Team, error)
+	AddManager(teamID, managerID uuid.UUID) error
+	RemoveManager(teamID, managerID uuid.UUID) error
+	AddMember(teamID, memberID uuid.UUID) error
+	RemoveMember(teamID, memberID uuid.UUID) error
+	IsTeamManager(teamID, userID uuid.UUID) (bool, error)
+	IsTeamMember(teamID, userID uuid.UUID) (bool, error)
+	Update(team *models.Team) error
+	Delete(teamID uuid.UUID) error
 }
