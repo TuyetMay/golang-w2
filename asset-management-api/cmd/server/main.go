@@ -14,7 +14,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid" // Add this import
+	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -29,7 +30,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	log.Printf("Database connected successfully")
+	
+	middleware.LogInfo("Database connected successfully", map[string]interface{}{
+		"host": cfg.Database.Host,
+		"port": cfg.Database.Port,
+		"name": cfg.Database.DBName,
+	})
 
 	// Initialize JWT utility
 	jwtUtil := utils.NewJWTUtil(cfg.JWT.SecretKey, cfg.JWT.ExpirationTime)
@@ -56,7 +62,7 @@ func main() {
 	// Initialize middleware
 	authMiddleware := middleware.NewAuthMiddleware(jwtUtil)
 
-	// Setup Gin router - Pass jwtUtil to setupRouter
+	// Setup Gin router
 	router := setupRouter(folderHandler, noteHandler, shareHandler, managerHandler, authMiddleware, jwtUtil)
 
 	// Create HTTP server
@@ -67,11 +73,18 @@ func main() {
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
 
-	log.Printf("Server starting on port %s", cfg.Server.Port)
-	log.Printf("Environment: %s", gin.Mode())
+	middleware.LogInfo("Server starting", map[string]interface{}{
+		"port":        cfg.Server.Port,
+		"environment": gin.Mode(),
+		"version":     "1.0.0",
+	})
 
 	// Start server
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		middleware.LogError(err, map[string]interface{}{
+			"component": "http_server",
+			"action":    "start",
+		})
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }
@@ -82,26 +95,39 @@ func setupRouter(
 	shareHandler *handler.ShareHandler,
 	managerHandler *handler.ManagerHandler,
 	authMiddleware *middleware.AuthMiddleware,
-	jwtUtil *utils.JWTUtil, // Add jwtUtil parameter
+	jwtUtil *utils.JWTUtil,
 ) *gin.Engine {
 	// Set Gin mode
-	gin.SetMode(gin.ReleaseMode) // Change to gin.DebugMode for development
+	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.New()
 
-	// Global middleware
+	// Global middleware - Order matters!
 	router.Use(middleware.RecoveryMiddleware())
-	router.Use(middleware.RequestLoggingMiddleware())
+	router.Use(middleware.StructuredLoggingMiddleware()) // Replace default Gin logger
+	router.Use(middleware.RequestResponseLoggingMiddleware()) // Detailed logging
+	router.Use(middleware.PrometheusMiddleware()) // Metrics collection
 	router.Use(middleware.CORSMiddleware())
 	router.Use(middleware.SecurityMiddleware())
 
-	// Health check endpoint
+	// Metrics endpoint for Prometheus
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	// Health check endpoint with enhanced monitoring
 	router.GET("/health", func(c *gin.Context) {
-		utils.SuccessResponse(c, http.StatusOK, "Server is healthy", gin.H{
+		healthData := gin.H{
 			"timestamp": time.Now().UTC(),
 			"service":   "asset-management-api",
 			"version":   "1.0.0",
+			"status":    "healthy",
+		}
+
+		middleware.LogInfo("Health check performed", map[string]interface{}{
+			"endpoint":  "/health",
+			"client_ip": c.ClientIP(),
 		})
+
+		utils.SuccessResponse(c, http.StatusOK, "Server is healthy", healthData)
 	})
 
 	// Test login endpoint for debugging (REMOVE IN PRODUCTION)
@@ -109,12 +135,27 @@ func setupRouter(
 		testUserID := uuid.New()
 		token, err := jwtUtil.GenerateToken(testUserID, "test@example.com", "manager", "testuser")
 		if err != nil {
+			middleware.LogError(err, map[string]interface{}{
+				"component": "jwt",
+				"action":    "generate_test_token",
+				"user_id":   testUserID,
+			})
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to generate token", err.Error())
 			return
 		}
+
+		// Record JWT generation
+		middleware.RecordJWTGenerated()
+		
+		middleware.LogBusinessEvent("test_login", map[string]interface{}{
+			"user_id":  testUserID,
+			"username": "testuser",
+			"role":     "manager",
+		})
+
 		utils.SuccessResponse(c, http.StatusOK, "Test token generated", gin.H{
-			"token": token,
-			"user_id": testUserID,
+			"token":      token,
+			"user_id":    testUserID,
 			"expires_in": "24h",
 		})
 	})
@@ -126,49 +167,122 @@ func setupRouter(
 		// Folder management routes
 		folders := v1.Group("/folders")
 		{
-			folders.POST("", folderHandler.CreateFolder)                    // Create folder
-			folders.GET("/:folderId", folderHandler.GetFolder)              // Get folder by ID
-			folders.PUT("/:folderId", folderHandler.UpdateFolder)           // Update folder
-			folders.DELETE("/:folderId", folderHandler.DeleteFolder)        // Delete folder
-			folders.GET("", folderHandler.GetUserFolders)                   // Get user's folders
+			folders.POST("", enhanceHandler(folderHandler.CreateFolder, "create_folder"))
+			folders.GET("/:folderId", enhanceHandler(folderHandler.GetFolder, "get_folder"))
+			folders.PUT("/:folderId", enhanceHandler(folderHandler.UpdateFolder, "update_folder"))
+			folders.DELETE("/:folderId", enhanceHandler(folderHandler.DeleteFolder, "delete_folder"))
+			folders.GET("", enhanceHandler(folderHandler.GetUserFolders, "get_user_folders"))
 
 			// Notes in folder
-			folders.POST("/:folderId/notes", noteHandler.CreateNote)        // Create note in folder
-			folders.GET("/:folderId/notes", noteHandler.GetNotesByFolder)   // Get notes in folder
+			folders.POST("/:folderId/notes", enhanceHandler(noteHandler.CreateNote, "create_note"))
+			folders.GET("/:folderId/notes", enhanceHandler(noteHandler.GetNotesByFolder, "get_folder_notes"))
 
 			// Folder sharing
-			folders.POST("/:folderId/share", shareHandler.ShareFolder)                    // Share folder
-			folders.DELETE("/:folderId/share/:userId", shareHandler.UnshareFolder)        // Unshare folder
-			folders.GET("/:folderId/shares", shareHandler.GetFolderShares)                // Get folder shares
+			folders.POST("/:folderId/share", enhanceHandler(shareHandler.ShareFolder, "share_folder"))
+			folders.DELETE("/:folderId/share/:userId", enhanceHandler(shareHandler.UnshareFolder, "unshare_folder"))
+			folders.GET("/:folderId/shares", enhanceHandler(shareHandler.GetFolderShares, "get_folder_shares"))
 		}
 
 		// Note management routes
 		notes := v1.Group("/notes")
 		{
-			notes.GET("/:noteId", noteHandler.GetNote)                      // Get note by ID
-			notes.PUT("/:noteId", noteHandler.UpdateNote)                   // Update note
-			notes.DELETE("/:noteId", noteHandler.DeleteNote)                // Delete note
-			notes.GET("", noteHandler.GetUserNotes)                         // Get user's notes
+			notes.GET("/:noteId", enhanceHandler(noteHandler.GetNote, "get_note"))
+			notes.PUT("/:noteId", enhanceHandler(noteHandler.UpdateNote, "update_note"))
+			notes.DELETE("/:noteId", enhanceHandler(noteHandler.DeleteNote, "delete_note"))
+			notes.GET("", enhanceHandler(noteHandler.GetUserNotes, "get_user_notes"))
 
 			// Note sharing
-			notes.POST("/:noteId/share", shareHandler.ShareNote)                         // Share note
-			notes.DELETE("/:noteId/share/:userId", shareHandler.UnshareNote)             // Unshare note
-			notes.GET("/:noteId/shares", shareHandler.GetNoteShares)                     // Get note shares
+			notes.POST("/:noteId/share", enhanceHandler(shareHandler.ShareNote, "share_note"))
+			notes.DELETE("/:noteId/share/:userId", enhanceHandler(shareHandler.UnshareNote, "unshare_note"))
+			notes.GET("/:noteId/shares", enhanceHandler(shareHandler.GetNoteShares, "get_note_shares"))
 		}
 
 		// Manager-only routes
 		manager := v1.Group("/")
 		manager.Use(authMiddleware.RequireManagerRole())
 		{
-			manager.GET("/teams/:teamId/assets", managerHandler.GetTeamAssets)    // Get team assets
-			manager.GET("/users/:userId/assets", managerHandler.GetUserAssets)    // Get user assets
+			manager.GET("/teams/:teamId/assets", enhanceHandler(managerHandler.GetTeamAssets, "get_team_assets"))
+			manager.GET("/users/:userId/assets", enhanceHandler(managerHandler.GetUserAssets, "get_user_assets"))
 		}
 	}
 
-	// 404 handler
+	// 404 handler with logging
 	router.NoRoute(func(c *gin.Context) {
+		middleware.LogInfo("404 Not Found", map[string]interface{}{
+			"path":      c.Request.URL.Path,
+			"method":    c.Request.Method,
+			"client_ip": c.ClientIP(),
+		})
 		utils.ErrorResponse(c, http.StatusNotFound, "Endpoint not found", "The requested endpoint does not exist")
 	})
 
 	return router
+}
+
+// enhanceHandler wraps handlers with additional monitoring and business logic
+func enhanceHandler(handler gin.HandlerFunc, operation string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		
+		// Get user context
+		userID, _ := middleware.GetUserIDFromContext(c)
+		userRole, _ := middleware.GetUserRoleFromContext(c)
+		
+		// Log business operation start
+		middleware.LogBusinessEvent(operation+"_started", map[string]interface{}{
+			"user_id":   userID,
+			"user_role": userRole,
+			"operation": operation,
+		})
+
+		// Execute handler
+		handler(c)
+
+		duration := time.Since(start)
+		
+		// Log business operation completion
+		status := "success"
+		if c.Writer.Status() >= 400 {
+			status = "error"
+		}
+		
+		middleware.LogBusinessEvent(operation+"_completed", map[string]interface{}{
+			"user_id":     userID,
+			"user_role":   userRole,
+			"operation":   operation,
+			"status":      status,
+			"duration_ms": duration.Milliseconds(),
+			"http_status": c.Writer.Status(),
+		})
+
+		// Record business metrics
+		switch operation {
+		case "create_folder":
+			if c.Writer.Status() < 400 {
+				middleware.RecordFolderCreated(userRole)
+			}
+		case "create_note":
+			if c.Writer.Status() < 400 {
+				middleware.RecordNoteCreated(userRole)
+			}
+		case "share_folder":
+			if c.Writer.Status() < 400 {
+				middleware.RecordShareCreated("folder", "unknown") // You can extract access level from request
+			}
+		case "share_note":
+			if c.Writer.Status() < 400 {
+				middleware.RecordShareCreated("note", "unknown")
+			}
+		}
+
+		// Log performance if slow
+		if duration > 1*time.Second {
+			middleware.LogPerformance(operation, duration, map[string]interface{}{
+				"user_id":     userID,
+				"user_role":   userRole,
+				"http_status": c.Writer.Status(),
+				"endpoint":    c.FullPath(),
+			})
+		}
+	}
 }
