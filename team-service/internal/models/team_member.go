@@ -15,12 +15,12 @@ type TeamMember struct {
 	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
 	
 	// Relationships
-	Team Team `json:"team,omitempty" gorm:"foreignKey:TeamID"`
-	User User `json:"user,omitempty" gorm:"foreignKey:UserID"`
+	Team *Team `json:"team,omitempty" gorm:"foreignKey:TeamID"`
+	User *User `json:"user,omitempty" gorm:"foreignKey:UserID"`
 }
 
 type TeamManager struct {
-	ID       uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	ID       uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"` // consider // b-tree index 
 	TeamID   uuid.UUID      `json:"team_id" gorm:"type:uuid;not null"`
 	UserID   uuid.UUID      `json:"user_id" gorm:"type:uuid;not null"`
 	AddedBy  uuid.UUID      `json:"added_by" gorm:"type:uuid;not null"`
@@ -30,4 +30,9 @@ type TeamManager struct {
 	// Relationships
 	Team Team `json:"team,omitempty" gorm:"foreignKey:TeamID"`
 	User User `json:"user,omitempty" gorm:"foreignKey:UserID"`
+}
+
+// add table name 
+func (t *TeamManager) TableName() string{
+	return "team_manager"
 }

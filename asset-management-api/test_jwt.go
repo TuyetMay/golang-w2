@@ -1,3 +1,4 @@
+// File: test_jwt.go
 package main
 
 import (
@@ -18,15 +19,15 @@ type Claims struct {
 }
 
 func main() {
-	// Dùng same secret như trong .env
 	secretKey := "your-super-secret-jwt-key-change-in-production-make-it-long-and-random"
 	
-	// Create a manager user
-	managerID := uuid.New()
+	// Use existing user ID from database
+	managerID := uuid.MustParse("123e4567-e89b-12d3-a456-426614174000")
+	
 	claims := &Claims{
 		UserID:   managerID,
 		Email:    "manager@test.com",
-		Role:     "manager",
+		Role:     "manager", 
 		Username: "test_manager",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
@@ -44,28 +45,4 @@ func main() {
 	fmt.Println("=== MANAGER TOKEN ===")
 	fmt.Println(tokenString)
 	fmt.Println("\nUserID:", managerID.String())
-	
-	// Create a member user
-	memberID := uuid.New()
-	memberClaims := &Claims{
-		UserID:   memberID,
-		Email:    "member@test.com",
-		Role:     "member",
-		Username: "test_member",
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			Subject:   memberID.String(),
-		},
-	}
-
-	memberToken := jwt.NewWithClaims(jwt.SigningMethodHS256, memberClaims)
-	memberTokenString, err := memberToken.SignedString([]byte(secretKey))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("\n=== MEMBER TOKEN ===")
-	fmt.Println(memberTokenString)
-	fmt.Println("\nUserID:", memberID.String())
 }

@@ -15,7 +15,7 @@ services:
   team-service:
     build: .
     ports:
-      - "8081:8081"
+      - "8082:8082"
     environment:
       - DATABASE_URL=postgres://postgres:iloveyou044@postgres:5432/teamdb?sslmode=disable
       - JWT_SECRET=your-secret-key-change-this-in-production
