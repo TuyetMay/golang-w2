@@ -1,11 +1,16 @@
 package service
 
 import (
+	"asset-management-api/internal/events/types"
 	"asset-management-api/internal/models"
 	"asset-management-api/internal/repository/interfaces"
 	serviceInterfaces "asset-management-api/internal/service/interfaces"
+	"asset-management-api/pkg/eventbus"
+	"context"
 	"errors"
 	"fmt"
+	"log"
+
 	"github.com/google/uuid"
 )
 
@@ -14,14 +19,17 @@ type shareService struct {
 	folderRepo interfaces.FolderRepository
 	noteRepo   interfaces.NoteRepository
 	userRepo   interfaces.UserRepository
+	eventBus   eventbus.EventBus // NEW: Added event bus
 }
 
-func NewShareService(shareRepo interfaces.ShareRepository, folderRepo interfaces.FolderRepository, noteRepo interfaces.NoteRepository, userRepo interfaces.UserRepository) serviceInterfaces.ShareService {
+// NEW: Updated constructor to accept event bus
+func NewShareService(shareRepo interfaces.ShareRepository, folderRepo interfaces.FolderRepository, noteRepo interfaces.NoteRepository, userRepo interfaces.UserRepository, eventBus eventbus.EventBus) serviceInterfaces.ShareService {
 	return &shareService{
 		shareRepo:  shareRepo,
 		folderRepo: folderRepo,
 		noteRepo:   noteRepo,
 		userRepo:   userRepo,
+		eventBus:   eventBus,
 	}
 }
 
@@ -41,7 +49,7 @@ func (s *shareService) ShareFolder(folderID, ownerID, targetUserID uuid.UUID, ac
 	}
 
 	// Check if target user exists
-	_, err = s.userRepo.GetByID(targetUserID)
+	targetUser, err := s.userRepo.GetByID(targetUserID)
 	if err != nil {
 		return fmt.Errorf("target user not found: %w", err)
 	}
@@ -49,6 +57,12 @@ func (s *shareService) ShareFolder(folderID, ownerID, targetUserID uuid.UUID, ac
 	// Don't allow sharing with the owner
 	if ownerID == targetUserID {
 		return errors.New("cannot share folder with yourself")
+	}
+
+	// Get owner info for event
+	ownerUser, err := s.userRepo.GetByID(ownerID)
+	if err != nil {
+		return fmt.Errorf("owner user not found: %w", err)
 	}
 
 	folderShare := &models.FolderShare{
@@ -63,6 +77,9 @@ func (s *shareService) ShareFolder(folderID, ownerID, targetUserID uuid.UUID, ac
 		return fmt.Errorf("failed to share folder: %w", err)
 	}
 
+	// NEW: Publish folder shared event
+	s.publishFolderSharedEvent(folderID, ownerID, targetUserID, accessLevel, ownerUser.Username)
+
 	return nil
 }
 
@@ -76,10 +93,19 @@ func (s *shareService) UnshareFolder(folderID, ownerID, targetUserID uuid.UUID) 
 		return errors.New("access denied: only the folder owner can unshare it")
 	}
 
+	// Get owner info for event
+	ownerUser, err := s.userRepo.GetByID(ownerID)
+	if err != nil {
+		return fmt.Errorf("owner user not found: %w", err)
+	}
+
 	err = s.shareRepo.UnshareFolder(folderID, targetUserID)
 	if err != nil {
 		return fmt.Errorf("failed to unshare folder: %w", err)
 	}
+
+	// NEW: Publish folder unshared event
+	s.publishFolderUnsharedEvent(folderID, ownerID, targetUserID, ownerUser.Username)
 
 	return nil
 }
@@ -118,7 +144,7 @@ func (s *shareService) ShareNote(noteID, ownerID, targetUserID uuid.UUID, access
 	}
 
 	// Check if target user exists
-	_, err = s.userRepo.GetByID(targetUserID)
+	targetUser, err := s.userRepo.GetByID(targetUserID)
 	if err != nil {
 		return fmt.Errorf("target user not found: %w", err)
 	}
@@ -126,6 +152,12 @@ func (s *shareService) ShareNote(noteID, ownerID, targetUserID uuid.UUID, access
 	// Don't allow sharing with the owner
 	if ownerID == targetUserID {
 		return errors.New("cannot share note with yourself")
+	}
+
+	// Get owner info for event
+	ownerUser, err := s.userRepo.GetByID(ownerID)
+	if err != nil {
+		return fmt.Errorf("owner user not found: %w", err)
 	}
 
 	noteShare := &models.NoteShare{
@@ -140,6 +172,9 @@ func (s *shareService) ShareNote(noteID, ownerID, targetUserID uuid.UUID, access
 		return fmt.Errorf("failed to share note: %w", err)
 	}
 
+	// NEW: Publish note shared event
+	s.publishNoteSharedEvent(noteID, ownerID, targetUserID, accessLevel, ownerUser.Username)
+
 	return nil
 }
 
@@ -153,10 +188,19 @@ func (s *shareService) UnshareNote(noteID, ownerID, targetUserID uuid.UUID) erro
 		return errors.New("access denied: only the note owner can unshare it")
 	}
 
+	// Get owner info for event
+	ownerUser, err := s.userRepo.GetByID(ownerID)
+	if err != nil {
+		return fmt.Errorf("owner user not found: %w", err)
+	}
+
 	err = s.shareRepo.UnshareNote(noteID, targetUserID)
 	if err != nil {
 		return fmt.Errorf("failed to unshare note: %w", err)
 	}
+
+	// NEW: Publish note unshared event
+	s.publishNoteUnsharedEvent(noteID, ownerID, targetUserID, ownerUser.Username)
 
 	return nil
 }
@@ -177,4 +221,92 @@ func (s *shareService) GetNoteShares(noteID, userID uuid.UUID) ([]*models.NoteSh
 	}
 
 	return shares, nil
+}
+
+// NEW: Event publishing methods for folder sharing
+func (s *shareService) publishFolderSharedEvent(folderID, ownerID, sharedWithUserID uuid.UUID, accessLevel, sharedByUserName string) {
+	if s.eventBus == nil {
+		return
+	}
+
+	event := types.NewAssetSharedEvent(
+		types.FolderShared,
+		types.AssetTypeFolder,
+		folderID,
+		ownerID,
+		ownerID, // actionBy is the owner who shared
+		sharedWithUserID,
+		accessLevel,
+		sharedByUserName,
+	)
+	
+	ctx := context.Background()
+	if err := s.eventBus.Publish(ctx, types.AssetChangesTopic, event); err != nil {
+		log.Printf("Failed to publish folder shared event: %v", err)
+	}
+}
+
+func (s *shareService) publishFolderUnsharedEvent(folderID, ownerID, unsharedFromUserID uuid.UUID, unsharedByUserName string) {
+	if s.eventBus == nil {
+		return
+	}
+
+	event := types.NewAssetUnsharedEvent(
+		types.FolderUnshared,
+		types.AssetTypeFolder,
+		folderID,
+		ownerID,
+		ownerID, // actionBy is the owner who unshared
+		unsharedFromUserID,
+		unsharedByUserName,
+	)
+	
+	ctx := context.Background()
+	if err := s.eventBus.Publish(ctx, types.AssetChangesTopic, event); err != nil {
+		log.Printf("Failed to publish folder unshared event: %v", err)
+	}
+}
+
+// NEW: Event publishing methods for note sharing
+func (s *shareService) publishNoteSharedEvent(noteID, ownerID, sharedWithUserID uuid.UUID, accessLevel, sharedByUserName string) {
+	if s.eventBus == nil {
+		return
+	}
+
+	event := types.NewAssetSharedEvent(
+		types.NoteShared,
+		types.AssetTypeNote,
+		noteID,
+		ownerID,
+		ownerID, // actionBy is the owner who shared
+		sharedWithUserID,
+		accessLevel,
+		sharedByUserName,
+	)
+	
+	ctx := context.Background()
+	if err := s.eventBus.Publish(ctx, types.AssetChangesTopic, event); err != nil {
+		log.Printf("Failed to publish note shared event: %v", err)
+	}
+}
+
+func (s *shareService) publishNoteUnsharedEvent(noteID, ownerID, unsharedFromUserID uuid.UUID, unsharedByUserName string) {
+	if s.eventBus == nil {
+		return
+	}
+
+	event := types.NewAssetUnsharedEvent(
+		types.NoteUnshared,
+		types.AssetTypeNote,
+		noteID,
+		ownerID,
+		ownerID, // actionBy is the owner who unshared
+		unsharedFromUserID,
+		unsharedByUserName,
+	)
+	
+	ctx := context.Background()
+	if err := s.eventBus.Publish(ctx, types.AssetChangesTopic, event); err != nil {
+		log.Printf("Failed to publish note unshared event: %v", err)
+	}
 }

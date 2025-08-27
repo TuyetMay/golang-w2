@@ -9,6 +9,7 @@ require (
 	github.com/google/uuid v1.3.1
 	github.com/joho/godotenv v1.4.0
 	github.com/prometheus/client_golang v1.17.0
+	github.com/segmentio/kafka-go v0.4.47  // NEW: Kafka client library
 	github.com/sirupsen/logrus v1.9.3
 	gorm.io/driver/postgres v1.5.3
 	gorm.io/gorm v1.25.5
@@ -30,6 +31,7 @@ require (
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
+	github.com/klauspost/compress v1.15.9 // indirect // NEW: Required by kafka-go
 	github.com/klauspost/cpuid/v2 v2.2.4 // indirect
 	github.com/leodido/go-urn v1.2.4 // indirect
 	github.com/mattn/go-isatty v0.0.19 // indirect
@@ -37,11 +39,15 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
+	github.com/pierrec/lz4/v4 v4.1.15 // indirect // NEW: Required by kafka-go
 	github.com/prometheus/client_model v0.4.1-0.20230718164431-9a2bf3000d16 // indirect
 	github.com/prometheus/common v0.44.0 // indirect
 	github.com/prometheus/procfs v0.11.1 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.11 // indirect
+	github.com/xdg-go/pbkdf2 v1.0.0 // indirect // NEW: Required by kafka-go
+	github.com/xdg-go/scram v1.1.1 // indirect // NEW: Required by kafka-go
+	github.com/xdg-go/stringprep v1.0.3 // indirect // NEW: Required by kafka-go
 	golang.org/x/arch v0.3.0 // indirect
 	golang.org/x/crypto v0.14.0 // indirect
 	golang.org/x/net v0.10.0 // indirect

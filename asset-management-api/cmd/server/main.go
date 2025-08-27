@@ -3,17 +3,22 @@ package main
 import (
 	"asset-management-api/internal/config"
 	"asset-management-api/internal/database"
+	"asset-management-api/internal/events/kafka"
 	"asset-management-api/internal/handler"
 	"asset-management-api/internal/middleware"
 	"asset-management-api/internal/repository/postgres"
 	"asset-management-api/internal/service"
 	"asset-management-api/internal/utils"
+	"asset-management-api/pkg/eventbus"
 
+	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -41,6 +46,24 @@ func main() {
 	// Initialize JWT utility
 	jwtUtil := utils.NewJWTUtil(cfg.JWT.SecretKey, cfg.JWT.ExpirationTime)
 
+	// NEW: Initialize Kafka event bus if enabled
+	var eventBus eventbus.EventBus
+	if cfg.Kafka.Enabled {
+		eventBus, err = initializeKafka(cfg)
+		if err != nil {
+			log.Printf("Failed to initialize Kafka: %v, continuing without event bus", err)
+			eventBus = &noOpEventBus{} // Fallback to no-op implementation
+		} else {
+			middleware.LogInfo("Kafka initialized successfully", map[string]interface{}{
+				"brokers": cfg.Kafka.Brokers,
+				"group_id": cfg.Kafka.ConsumerGroupID,
+			})
+		}
+	} else {
+		log.Println("Kafka disabled, using no-op event bus")
+		eventBus = &noOpEventBus{}
+	}
+
 	// Initialize repositories
 	folderRepo := postgres.NewFolderRepository(db)
 	noteRepo := postgres.NewNoteRepository(db)
@@ -48,23 +71,25 @@ func main() {
 	userRepo := postgres.NewUserRepository(db)
 	teamRepo := postgres.NewTeamRepository(db)
 
-	// Initialize services
-	folderService := service.NewFolderService(folderRepo, shareRepo)
-	noteService := service.NewNoteService(noteRepo, folderRepo, shareRepo)
-	shareService := service.NewShareService(shareRepo, folderRepo, noteRepo, userRepo)
+	// NEW: Initialize services with event bus
+	folderService := service.NewFolderService(folderRepo, shareRepo, eventBus)
+	noteService := service.NewNoteService(noteRepo, folderRepo, shareRepo, eventBus)
+	shareService := service.NewShareService(shareRepo, folderRepo, noteRepo, userRepo, eventBus)
 	managerService := service.NewManagerService(userRepo, teamRepo, folderRepo, noteRepo, shareRepo)
+	teamService := service.NewTeamService(teamRepo, userRepo, eventBus)
 
 	// Initialize handlers
 	folderHandler := handler.NewFolderHandler(folderService)
 	noteHandler := handler.NewNoteHandler(noteService)
 	shareHandler := handler.NewShareHandler(shareService)
 	managerHandler := handler.NewManagerHandler(managerService)
+	teamHandler := handler.NewTeamHandler(teamService)
 
 	// Initialize middleware
 	authMiddleware := middleware.NewAuthMiddleware(jwtUtil)
 
 	// Setup Gin router
-	router := setupRouter(folderHandler, noteHandler, shareHandler, managerHandler, authMiddleware, jwtUtil)
+	router := setupRouter(folderHandler, noteHandler, shareHandler, managerHandler, teamHandler, authMiddleware, jwtUtil)
 
 	// Create HTTP server
 	server := &http.Server{
@@ -74,20 +99,112 @@ func main() {
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
 
-	middleware.LogInfo("Server starting", map[string]interface{}{
-		"port":        cfg.Server.Port,
-		"environment": gin.Mode(),
-		"version":     "1.0.0",
-	})
+	// Setup graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// Start server
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		middleware.LogError(err, map[string]interface{}{
-			"component": "http_server",
-			"action":    "start",
+	// Start server in a goroutine
+	go func() {
+		middleware.LogInfo("Server starting", map[string]interface{}{
+			"port":        cfg.Server.Port,
+			"environment": gin.Mode(),
+			"version":     "1.0.0",
+			"kafka_enabled": cfg.Kafka.Enabled,
 		})
-		log.Fatalf("Failed to start server: %v", err)
+
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			middleware.LogError(err, map[string]interface{}{
+				"component": "http_server",
+				"action":    "start",
+			})
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	<-ctx.Done()
+	
+	// Graceful shutdown
+	log.Println("Shutting down server...")
+	
+	// Create a deadline for shutdown
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Shutdown HTTP server
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Server forced to shutdown: %v", err)
 	}
+
+	// Close event bus
+	if eventBus != nil {
+		if err := eventBus.Close(); err != nil {
+			log.Printf("Error closing event bus: %v", err)
+		}
+	}
+
+	log.Println("Server exited")
+}
+
+// NEW: Initialize Kafka event bus
+func initializeKafka(cfg *config.Config) (eventbus.EventBus, error) {
+	// Create Kafka configuration
+	kafkaConfig := &kafka.KafkaConfig{
+		Brokers: cfg.Kafka.Brokers,
+		ProducerConfig: kafka.ProducerConfig{
+			RetryMax:         cfg.Kafka.ProducerRetryMax,
+			RequiredAcks:     cfg.Kafka.ProducerRequiredAcks,
+			FlushTimeout:     cfg.Kafka.ProducerFlushTimeout,
+			FlushFrequency:   100 * time.Millisecond,
+			FlushMessages:    100,
+			CompressionType:  "snappy",
+			IdempotentWrites: true,
+		},
+		ConsumerConfig: kafka.ConsumerConfig{
+			GroupID:            cfg.Kafka.ConsumerGroupID,
+			SessionTimeout:     cfg.Kafka.ConsumerSessionTimeout,
+			HeartbeatInterval:  3 * time.Second,
+			RebalanceTimeout:   60 * time.Second,
+			AutoCommit:         true,
+			AutoCommitInterval: cfg.Kafka.AutoCommitInterval,
+		},
+	}
+
+	// Create producer
+	producer := kafka.NewKafkaProducer(kafkaConfig)
+	
+	// Test connectivity by creating a dummy writer
+	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	// Try to publish a test message to validate connectivity
+	if err := producer.Publish(testCtx, "test.connectivity", map[string]string{
+		"test": "connectivity",
+		"timestamp": time.Now().Format(time.RFC3339),
+	}); err != nil {
+		return nil, err
+	}
+
+	log.Println("Kafka connectivity test successful")
+	return producer, nil
+}
+
+// NEW: No-op event bus for fallback
+type noOpEventBus struct{}
+
+func (n *noOpEventBus) Publish(ctx context.Context, topic string, event interface{}) error {
+	// Log the event that would have been published
+	log.Printf("No-op event bus: would publish to topic %s: %+v", topic, event)
+	return nil
+}
+
+func (n *noOpEventBus) Subscribe(ctx context.Context, topic string, handler eventbus.EventHandler) error {
+	log.Printf("No-op event bus: would subscribe to topic %s", topic)
+	return nil
+}
+
+func (n *noOpEventBus) Close() error {
+	return nil
 }
 
 func setupRouter(
@@ -95,6 +212,7 @@ func setupRouter(
 	noteHandler *handler.NoteHandler,
 	shareHandler *handler.ShareHandler,
 	managerHandler *handler.ManagerHandler,
+	teamHandler *handler.TeamHandler, // NEW: Added team handler
 	authMiddleware *middleware.AuthMiddleware,
 	jwtUtil *utils.JWTUtil,
 ) *gin.Engine {
@@ -196,6 +314,22 @@ func setupRouter(
 			notes.POST("/:noteId/share", enhanceHandler(shareHandler.ShareNote, "share_note"))
 			notes.DELETE("/:noteId/share/:userId", enhanceHandler(shareHandler.UnshareNote, "unshare_note"))
 			notes.GET("/:noteId/shares", enhanceHandler(shareHandler.GetNoteShares, "get_note_shares"))
+		}
+
+		// NEW: Team management routes
+		teams := v1.Group("/teams")
+		{
+			teams.POST("", enhanceHandler(teamHandler.CreateTeam, "create_team"))
+			teams.GET("/:teamId", enhanceHandler(teamHandler.GetTeam, "get_team"))
+			teams.GET("", enhanceHandler(teamHandler.GetUserTeams, "get_user_teams"))
+
+			// Team member management
+			teams.POST("/:teamId/members", enhanceHandler(teamHandler.AddMember, "add_team_member"))
+			teams.DELETE("/:teamId/members/:memberId", enhanceHandler(teamHandler.RemoveMember, "remove_team_member"))
+
+			// Team manager management
+			teams.POST("/:teamId/managers", enhanceHandler(teamHandler.AddManager, "add_team_manager"))
+			teams.DELETE("/:teamId/managers/:managerId", enhanceHandler(teamHandler.RemoveManager, "remove_team_manager"))
 		}
 
 		// Manager-only routes

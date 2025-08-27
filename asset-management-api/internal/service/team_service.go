@@ -1,24 +1,31 @@
 package service
 
 import (
+	"asset-management-api/internal/events/types"
 	"asset-management-api/internal/models"
 	"asset-management-api/internal/repository/interfaces"
 	serviceInterfaces "asset-management-api/internal/service/interfaces"
+	"asset-management-api/pkg/eventbus"
+	"context"
 	"errors"
 	"fmt"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"log"
 )
 
 type teamService struct {
-	teamRepo interfaces.TeamRepository
-	userRepo interfaces.UserRepository
+	teamRepo  interfaces.TeamRepository
+	userRepo  interfaces.UserRepository
+	eventBus  eventbus.EventBus // NEW: Added event bus
 }
 
-func NewTeamService(teamRepo interfaces.TeamRepository, userRepo interfaces.UserRepository) serviceInterfaces.TeamService {
+// NEW: Updated constructor to accept event bus
+func NewTeamService(teamRepo interfaces.TeamRepository, userRepo interfaces.UserRepository, eventBus eventbus.EventBus) serviceInterfaces.TeamService {
 	return &teamService{
 		teamRepo: teamRepo,
 		userRepo: userRepo,
+		eventBus: eventBus,
 	}
 }
 
@@ -53,6 +60,9 @@ func (s *teamService) CreateTeam(creatorID uuid.UUID, teamName string, managers 
 		return nil, fmt.Errorf("failed to add creator as manager: %w", err)
 	}
 
+	var managerIDs []uuid.UUID
+	var memberIDs []uuid.UUID
+
 	// Add additional managers
 	for _, manager := range managers {
 		managerID, err := uuid.Parse(manager.UserID)
@@ -72,8 +82,12 @@ func (s *teamService) CreateTeam(creatorID uuid.UUID, teamName string, managers 
 		// Don't add creator again
 		if managerID != creatorID {
 			s.teamRepo.AddManager(team.TeamID, managerID)
+			managerIDs = append(managerIDs, managerID)
 		}
 	}
+
+	// Add creator to manager list for event
+	managerIDs = append(managerIDs, creatorID)
 
 	// Add members
 	for _, member := range members {
@@ -89,7 +103,11 @@ func (s *teamService) CreateTeam(creatorID uuid.UUID, teamName string, managers 
 		}
 
 		s.teamRepo.AddMember(team.TeamID, memberID)
+		memberIDs = append(memberIDs, memberID)
 	}
+
+	// NEW: Publish team created event
+	s.publishTeamCreatedEvent(team.TeamID, creatorID, teamName, managerIDs, memberIDs)
 
 	// Get the complete team with relationships
 	return s.teamRepo.GetByID(team.TeamID)
@@ -106,7 +124,7 @@ func (s *teamService) AddMember(teamID, requestorID, memberID uuid.UUID) error {
 	}
 
 	// Check if user exists
-	_, err = s.userRepo.GetByID(memberID)
+	user, err := s.userRepo.GetByID(memberID)
 	if err != nil {
 		return fmt.Errorf("user not found: %w", err)
 	}
@@ -120,7 +138,15 @@ func (s *teamService) AddMember(teamID, requestorID, memberID uuid.UUID) error {
 		return errors.New("user is already a member of this team")
 	}
 
-	return s.teamRepo.AddMember(teamID, memberID)
+	err = s.teamRepo.AddMember(teamID, memberID)
+	if err != nil {
+		return err
+	}
+
+	// NEW: Publish member added event
+	s.publishMemberAddedEvent(teamID, requestorID, memberID, user.Username)
+
+	return nil
 }
 
 func (s *teamService) RemoveMember(teamID, requestorID, memberID uuid.UUID) error {
@@ -133,6 +159,12 @@ func (s *teamService) RemoveMember(teamID, requestorID, memberID uuid.UUID) erro
 		return errors.New("access denied: only team managers can remove members")
 	}
 
+	// Get user info before removal
+	user, err := s.userRepo.GetByID(memberID)
+	if err != nil {
+		return fmt.Errorf("user not found: %w", err)
+	}
+
 	// Check if member exists in team
 	isMember, err := s.teamRepo.IsTeamMember(teamID, memberID)
 	if err != nil {
@@ -142,7 +174,15 @@ func (s *teamService) RemoveMember(teamID, requestorID, memberID uuid.UUID) erro
 		return errors.New("member not found in team")
 	}
 
-	return s.teamRepo.RemoveMember(teamID, memberID)
+	err = s.teamRepo.RemoveMember(teamID, memberID)
+	if err != nil {
+		return err
+	}
+
+	// NEW: Publish member removed event
+	s.publishMemberRemovedEvent(teamID, requestorID, memberID, user.Username)
+
+	return nil
 }
 
 func (s *teamService) AddManager(teamID, requestorID, managerID uuid.UUID) error {
@@ -179,7 +219,15 @@ func (s *teamService) AddManager(teamID, requestorID, managerID uuid.UUID) error
 		s.teamRepo.RemoveMember(teamID, managerID)
 	}
 
-	return s.teamRepo.AddManager(teamID, managerID)
+	err = s.teamRepo.AddManager(teamID, managerID)
+	if err != nil {
+		return err
+	}
+
+	// NEW: Publish manager added event
+	s.publishManagerAddedEvent(teamID, requestorID, managerID, user.Username)
+
+	return nil
 }
 
 func (s *teamService) RemoveManager(teamID, requestorID, managerID uuid.UUID) error {
@@ -203,6 +251,12 @@ func (s *teamService) RemoveManager(teamID, requestorID, managerID uuid.UUID) er
 		return errors.New("cannot remove the team creator")
 	}
 
+	// Get user info before removal
+	user, err := s.userRepo.GetByID(managerID)
+	if err != nil {
+		return fmt.Errorf("user not found: %w", err)
+	}
+
 	// Check if target is actually a manager
 	isManager, err := s.teamRepo.IsTeamManager(teamID, managerID)
 	if err != nil {
@@ -212,7 +266,15 @@ func (s *teamService) RemoveManager(teamID, requestorID, managerID uuid.UUID) er
 		return errors.New("manager not found in team")
 	}
 
-	return s.teamRepo.RemoveManager(teamID, managerID)
+	err = s.teamRepo.RemoveManager(teamID, managerID)
+	if err != nil {
+		return err
+	}
+
+	// NEW: Publish manager removed event
+	s.publishManagerRemovedEvent(teamID, requestorID, managerID, user.Username)
+
+	return nil
 }
 
 func (s *teamService) GetTeam(teamID, userID uuid.UUID) (*models.Team, error) {
@@ -266,4 +328,70 @@ func (s *teamService) GetUserTeams(userID uuid.UUID) ([]*models.Team, error) {
 	}
 
 	return allTeams, nil
+}
+
+// NEW: Event publishing methods
+func (s *teamService) publishTeamCreatedEvent(teamID, performedBy uuid.UUID, teamName string, managers, members []uuid.UUID) {
+	if s.eventBus == nil {
+		return
+	}
+
+	event := types.NewTeamCreatedEvent(teamID, performedBy, teamName, managers, members)
+	
+	ctx := context.Background()
+	if err := s.eventBus.Publish(ctx, types.TeamActivityTopic, event); err != nil {
+		log.Printf("Failed to publish team created event: %v", err)
+	}
+}
+
+func (s *teamService) publishMemberAddedEvent(teamID, performedBy, targetUserID uuid.UUID, userName string) {
+	if s.eventBus == nil {
+		return
+	}
+
+	event := types.NewMemberAddedEvent(teamID, performedBy, targetUserID, userName)
+	
+	ctx := context.Background()
+	if err := s.eventBus.Publish(ctx, types.TeamActivityTopic, event); err != nil {
+		log.Printf("Failed to publish member added event: %v", err)
+	}
+}
+
+func (s *teamService) publishMemberRemovedEvent(teamID, performedBy, targetUserID uuid.UUID, userName string) {
+	if s.eventBus == nil {
+		return
+	}
+
+	event := types.NewMemberRemovedEvent(teamID, performedBy, targetUserID, userName)
+	
+	ctx := context.Background()
+	if err := s.eventBus.Publish(ctx, types.TeamActivityTopic, event); err != nil {
+		log.Printf("Failed to publish member removed event: %v", err)
+	}
+}
+
+func (s *teamService) publishManagerAddedEvent(teamID, performedBy, targetUserID uuid.UUID, userName string) {
+	if s.eventBus == nil {
+		return
+	}
+
+	event := types.NewManagerAddedEvent(teamID, performedBy, targetUserID, userName)
+	
+	ctx := context.Background()
+	if err := s.eventBus.Publish(ctx, types.TeamActivityTopic, event); err != nil {
+		log.Printf("Failed to publish manager added event: %v", err)
+	}
+}
+
+func (s *teamService) publishManagerRemovedEvent(teamID, performedBy, targetUserID uuid.UUID, userName string) {
+	if s.eventBus == nil {
+		return
+	}
+
+	event := types.NewManagerRemovedEvent(teamID, performedBy, targetUserID, userName)
+	
+	ctx := context.Background()
+	if err := s.eventBus.Publish(ctx, types.TeamActivityTopic, event); err != nil {
+		log.Printf("Failed to publish manager removed event: %v", err)
+	}
 }

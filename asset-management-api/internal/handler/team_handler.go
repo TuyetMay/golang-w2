@@ -1,305 +1,261 @@
-package handler
+package handlers
 
 import (
-	"asset-management-api/internal/middleware"
-	"asset-management-api/internal/service/interfaces"
-	"asset-management-api/internal/utils"
-	"net/http"
+	"asset-management-api/internal/events/types"
+	"context"
+	"encoding/json"
+	"log"
+	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
-type TeamHandler struct {
-	teamService interfaces.TeamService
+// TeamEventHandler handles team-related events
+type TeamEventHandler struct {
+	db *gorm.DB
 }
 
-type CreateTeamRequest struct {
-	TeamName string `json:"teamName" validate:"required,min=1,max=255"`
-	Managers []interfaces.TeamMemberInfo `json:"managers" validate:"dive"`
-	Members  []interfaces.TeamMemberInfo `json:"members" validate:"dive"`
+// NewTeamEventHandler creates a new team event handler
+func NewTeamEventHandler(db *gorm.DB) *TeamEventHandler {
+	return &TeamEventHandler{db: db}
 }
 
-type AddMemberRequest struct {
-	UserID   string `json:"userId" validate:"required,uuid"`
-	UserName string `json:"userName" validate:"required"`
+// HandleTeamEvent processes team events
+func (h *TeamEventHandler) HandleTeamEvent(ctx context.Context, eventData []byte) error {
+	// Parse the base event to determine the event type
+	var baseEvent types.BaseTeamEvent
+	if err := json.Unmarshal(eventData, &baseEvent); err != nil {
+		log.Printf("Failed to parse team event: %v", err)
+		return err
+	}
+
+	log.Printf("Processing team event: %s for team %s", baseEvent.EventType, baseEvent.TeamID)
+
+	switch baseEvent.EventType {
+	case types.TeamCreated:
+		return h.handleTeamCreated(ctx, eventData)
+	case types.MemberAdded:
+		return h.handleMemberAdded(ctx, eventData)
+	case types.MemberRemoved:
+		return h.handleMemberRemoved(ctx, eventData)
+	case types.ManagerAdded:
+		return h.handleManagerAdded(ctx, eventData)
+	case types.ManagerRemoved:
+		return h.handleManagerRemoved(ctx, eventData)
+	default:
+		log.Printf("Unknown team event type: %s", baseEvent.EventType)
+		return nil
+	}
 }
 
-func NewTeamHandler(teamService interfaces.TeamService) *TeamHandler {
-	return &TeamHandler{teamService: teamService}
+// handleTeamCreated processes team creation events
+func (h *TeamEventHandler) handleTeamCreated(ctx context.Context, eventData []byte) error {
+	var event types.TeamCreatedEvent
+	if err := json.Unmarshal(eventData, &event); err != nil {
+		return err
+	}
+
+	// Log the team creation for audit purposes
+	auditLog := TeamAuditLog{
+		TeamID:      event.TeamID,
+		EventType:   event.EventType,
+		PerformedBy: event.PerformedBy,
+		Details: map[string]interface{}{
+			"team_name":      event.TeamName,
+			"managers_count": len(event.Managers),
+			"members_count":  len(event.Members),
+		},
+		Timestamp: event.Timestamp,
+	}
+
+	return h.saveAuditLog(ctx, auditLog)
 }
 
-// POST /teams
-func (h *TeamHandler) CreateTeam(c *gin.Context) {
-	userID, exists := middleware.GetUserIDFromContext(c)
-	if !exists {
-		utils.UnauthorizedResponse(c, "User not authenticated")
-		return
+// handleMemberAdded processes member addition events
+func (h *TeamEventHandler) handleMemberAdded(ctx context.Context, eventData []byte) error {
+	var event types.MemberChangedEvent
+	if err := json.Unmarshal(eventData, &event); err != nil {
+		return err
 	}
 
-	// Check if user is manager
-	userRole, _ := middleware.GetUserRoleFromContext(c)
-	if userRole != "manager" {
-		utils.ForbiddenResponse(c, "Only managers can create teams")
-		return
+	// Log the member addition
+	auditLog := TeamAuditLog{
+		TeamID:      event.TeamID,
+		EventType:   event.EventType,
+		PerformedBy: event.PerformedBy,
+		Details: map[string]interface{}{
+			"target_user_id": event.TargetUserID,
+			"user_name":      event.UserName,
+		},
+		Timestamp: event.Timestamp,
 	}
 
-	var req CreateTeamRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.BadRequestResponse(c, "Invalid request format", err)
-		return
-	}
+	// Send notification (example)
+	go h.sendNotification(ctx, NotificationRequest{
+		Type:      "team_member_added",
+		TeamID:    event.TeamID,
+		UserID:    event.TargetUserID,
+		Message:   fmt.Sprintf("%s has been added to the team", event.UserName),
+		Timestamp: event.Timestamp,
+	})
 
-	// Validate request
-	if errors := utils.ValidateStruct(req); len(errors) > 0 {
-		utils.ValidationErrorResponse(c, utils.GetValidationErrorMessages(errors))
-		return
-	}
-
-	team, err := h.teamService.CreateTeam(userID, req.TeamName, req.Managers, req.Members)
-	if err != nil {
-		if err.Error() == "access denied: only managers can create teams" {
-			utils.ForbiddenResponse(c, "Manager role required")
-			return
-		}
-		utils.InternalServerErrorResponse(c, "Failed to create team", err)
-		return
-	}
-
-	utils.SuccessResponse(c, http.StatusCreated, "Team created successfully", team)
+	return h.saveAuditLog(ctx, auditLog)
 }
 
-// POST /teams/:teamId/members
-func (h *TeamHandler) AddMember(c *gin.Context) {
-	userID, exists := middleware.GetUserIDFromContext(c)
-	if !exists {
-		utils.UnauthorizedResponse(c, "User not authenticated")
-		return
+// handleMemberRemoved processes member removal events
+func (h *TeamEventHandler) handleMemberRemoved(ctx context.Context, eventData []byte) error {
+	var event types.MemberChangedEvent
+	if err := json.Unmarshal(eventData, &event); err != nil {
+		return err
 	}
 
-	teamIDStr := c.Param("teamId")
-	teamID, err := uuid.Parse(teamIDStr)
-	if err != nil {
-		utils.BadRequestResponse(c, "Invalid team ID format", err)
-		return
+	// Log the member removal
+	auditLog := TeamAuditLog{
+		TeamID:      event.TeamID,
+		EventType:   event.EventType,
+		PerformedBy: event.PerformedBy,
+		Details: map[string]interface{}{
+			"target_user_id": event.TargetUserID,
+			"user_name":      event.UserName,
+		},
+		Timestamp: event.Timestamp,
 	}
 
-	var req AddMemberRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.BadRequestResponse(c, "Invalid request format", err)
-		return
-	}
+	// Send notification
+	go h.sendNotification(ctx, NotificationRequest{
+		Type:      "team_member_removed",
+		TeamID:    event.TeamID,
+		UserID:    event.TargetUserID,
+		Message:   fmt.Sprintf("%s has been removed from the team", event.UserName),
+		Timestamp: event.Timestamp,
+	})
 
-	// Validate request
-	if errors := utils.ValidateStruct(req); len(errors) > 0 {
-		utils.ValidationErrorResponse(c, utils.GetValidationErrorMessages(errors))
-		return
-	}
-
-	memberID, err := uuid.Parse(req.UserID)
-	if err != nil {
-		utils.BadRequestResponse(c, "Invalid user ID format", err)
-		return
-	}
-
-	err = h.teamService.AddMember(teamID, userID, memberID)
-	if err != nil {
-		if err.Error() == "access denied: only team managers can add members" {
-			utils.ForbiddenResponse(c, "Access denied")
-			return
-		}
-		if err.Error() == "user is already a member of this team" {
-			utils.BadRequestResponse(c, "User is already a team member", err)
-			return
-		}
-		utils.InternalServerErrorResponse(c, "Failed to add member", err)
-		return
-	}
-
-	utils.SuccessResponse(c, http.StatusOK, "Member added successfully", nil)
+	return h.saveAuditLog(ctx, auditLog)
 }
 
-// DELETE /teams/:teamId/members/:memberId
-func (h *TeamHandler) RemoveMember(c *gin.Context) {
-	userID, exists := middleware.GetUserIDFromContext(c)
-	if !exists {
-		utils.UnauthorizedResponse(c, "User not authenticated")
-		return
+// handleManagerAdded processes manager addition events
+func (h *TeamEventHandler) handleManagerAdded(ctx context.Context, eventData []byte) error {
+	var event types.ManagerChangedEvent
+	if err := json.Unmarshal(eventData, &event); err != nil {
+		return err
 	}
 
-	teamIDStr := c.Param("teamId")
-	teamID, err := uuid.Parse(teamIDStr)
-	if err != nil {
-		utils.BadRequestResponse(c, "Invalid team ID format", err)
-		return
+	// Log the manager addition
+	auditLog := TeamAuditLog{
+		TeamID:      event.TeamID,
+		EventType:   event.EventType,
+		PerformedBy: event.PerformedBy,
+		Details: map[string]interface{}{
+			"target_user_id": event.TargetUserID,
+			"user_name":      event.UserName,
+		},
+		Timestamp: event.Timestamp,
 	}
 
-	memberIDStr := c.Param("memberId")
-	memberID, err := uuid.Parse(memberIDStr)
-	if err != nil {
-		utils.BadRequestResponse(c, "Invalid member ID format", err)
-		return
-	}
+	// Send notification
+	go h.sendNotification(ctx, NotificationRequest{
+		Type:      "team_manager_added",
+		TeamID:    event.TeamID,
+		UserID:    event.TargetUserID,
+		Message:   fmt.Sprintf("%s has been promoted to team manager", event.UserName),
+		Timestamp: event.Timestamp,
+	})
 
-	err = h.teamService.RemoveMember(teamID, userID, memberID)
-	if err != nil {
-		if err.Error() == "access denied: only team managers can remove members" {
-			utils.ForbiddenResponse(c, "Access denied")
-			return
-		}
-		if err.Error() == "member not found in team" {
-			utils.NotFoundResponse(c, "Member not found")
-			return
-		}
-		utils.InternalServerErrorResponse(c, "Failed to remove member", err)
-		return
-	}
-
-	utils.SuccessResponse(c, http.StatusOK, "Member removed successfully", nil)
+	return h.saveAuditLog(ctx, auditLog)
 }
 
-// POST /teams/:teamId/managers
-func (h *TeamHandler) AddManager(c *gin.Context) {
-	userID, exists := middleware.GetUserIDFromContext(c)
-	if !exists {
-		utils.UnauthorizedResponse(c, "User not authenticated")
-		return
+// handleManagerRemoved processes manager removal events
+func (h *TeamEventHandler) handleManagerRemoved(ctx context.Context, eventData []byte) error {
+	var event types.ManagerChangedEvent
+	if err := json.Unmarshal(eventData, &event); err != nil {
+		return err
 	}
 
-	teamIDStr := c.Param("teamId")
-	teamID, err := uuid.Parse(teamIDStr)
-	if err != nil {
-		utils.BadRequestResponse(c, "Invalid team ID format", err)
-		return
+	// Log the manager removal
+	auditLog := TeamAuditLog{
+		TeamID:      event.TeamID,
+		EventType:   event.EventType,
+		PerformedBy: event.PerformedBy,
+		Details: map[string]interface{}{
+			"target_user_id": event.TargetUserID,
+			"user_name":      event.UserName,
+		},
+		Timestamp: event.Timestamp,
 	}
 
-	var req AddMemberRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.BadRequestResponse(c, "Invalid request format", err)
-		return
-	}
-
-	// Validate request
-	if errors := utils.ValidateStruct(req); len(errors) > 0 {
-		utils.ValidationErrorResponse(c, utils.GetValidationErrorMessages(errors))
-		return
-	}
-
-	managerID, err := uuid.Parse(req.UserID)
-	if err != nil {
-		utils.BadRequestResponse(c, "Invalid user ID format", err)
-		return
-	}
-
-	err = h.teamService.AddManager(teamID, userID, managerID)
-	if err != nil {
-		if err.Error() == "access denied: only team managers can add other managers" {
-			utils.ForbiddenResponse(c, "Access denied")
-			return
-		}
-		if err.Error() == "user is already a manager of this team" {
-			utils.BadRequestResponse(c, "User is already a team manager", err)
-			return
-		}
-		if err.Error() == "target user must have manager role" {
-			utils.BadRequestResponse(c, "User must have manager role", err)
-			return
-		}
-		utils.InternalServerErrorResponse(c, "Failed to add manager", err)
-		return
-	}
-
-	utils.SuccessResponse(c, http.StatusOK, "Manager added successfully", nil)
+	return h.saveAuditLog(ctx, auditLog)
 }
 
-// DELETE /teams/:teamId/managers/:managerId
-func (h *TeamHandler) RemoveManager(c *gin.Context) {
-	userID, exists := middleware.GetUserIDFromContext(c)
-	if !exists {
-		utils.UnauthorizedResponse(c, "User not authenticated")
-		return
+// saveAuditLog saves audit log to database
+func (h *TeamEventHandler) saveAuditLog(ctx context.Context, auditLog TeamAuditLog) error {
+	result := h.db.WithContext(ctx).Create(&auditLog)
+	if result.Error != nil {
+		log.Printf("Failed to save team audit log: %v", result.Error)
+		return result.Error
 	}
-
-	teamIDStr := c.Param("teamId")
-	teamID, err := uuid.Parse(teamIDStr)
-	if err != nil {
-		utils.BadRequestResponse(c, "Invalid team ID format", err)
-		return
-	}
-
-	managerIDStr := c.Param("managerId")
-	managerID, err := uuid.Parse(managerIDStr)
-	if err != nil {
-		utils.BadRequestResponse(c, "Invalid manager ID format", err)
-		return
-	}
-
-	err = h.teamService.RemoveManager(teamID, userID, managerID)
-	if err != nil {
-		if err.Error() == "access denied: only team managers can remove other managers" {
-			utils.ForbiddenResponse(c, "Access denied")
-			return
-		}
-		if err.Error() == "manager not found in team" {
-			utils.NotFoundResponse(c, "Manager not found")
-			return
-		}
-		if err.Error() == "cannot remove the team creator" {
-			utils.ForbiddenResponse(c, "Cannot remove team creator")
-			return
-		}
-		utils.InternalServerErrorResponse(c, "Failed to remove manager", err)
-		return
-	}
-
-	utils.SuccessResponse(c, http.StatusOK, "Manager removed successfully", nil)
+	
+	log.Printf("Team audit log saved: %s for team %s", auditLog.EventType, auditLog.TeamID)
+	return nil
 }
 
-// GET /teams/:teamId
-func (h *TeamHandler) GetTeam(c *gin.Context) {
-	userID, exists := middleware.GetUserIDFromContext(c)
-	if !exists {
-		utils.UnauthorizedResponse(c, "User not authenticated")
-		return
+// sendNotification sends notifications (example implementation)
+func (h *TeamEventHandler) sendNotification(ctx context.Context, req NotificationRequest) {
+	// This is a placeholder - in a real implementation, you might:
+	// 1. Send email notifications
+	// 2. Send push notifications
+	// 3. Update a notification service
+	// 4. Send webhooks to external systems
+	
+	log.Printf("Sending notification: %s to user %s for team %s", 
+		req.Message, req.UserID, req.TeamID)
+	
+	// Example: Save notification to database
+	notification := Notification{
+		Type:      req.Type,
+		TeamID:    req.TeamID,
+		UserID:    req.UserID,
+		Message:   req.Message,
+		CreatedAt: req.Timestamp,
+		Read:      false,
 	}
-
-	teamIDStr := c.Param("teamId")
-	teamID, err := uuid.Parse(teamIDStr)
-	if err != nil {
-		utils.BadRequestResponse(c, "Invalid team ID format", err)
-		return
+	
+	if err := h.db.WithContext(ctx).Create(&notification).Error; err != nil {
+		log.Printf("Failed to save notification: %v", err)
 	}
-
-	team, err := h.teamService.GetTeam(teamID, userID)
-	if err != nil {
-		if err.Error() == "access denied: you are not a member of this team" {
-			utils.ForbiddenResponse(c, "Access denied")
-			return
-		}
-		if err.Error() == "team not found" {
-			utils.NotFoundResponse(c, "Team not found")
-			return
-		}
-		utils.InternalServerErrorResponse(c, "Failed to get team", err)
-		return
-	}
-
-	utils.SuccessResponse(c, http.StatusOK, "Team retrieved successfully", team)
 }
 
-// GET /teams (Get user's teams)
-func (h *TeamHandler) GetUserTeams(c *gin.Context) {
-	userID, exists := middleware.GetUserIDFromContext(c)
-	if !exists {
-		utils.UnauthorizedResponse(c, "User not authenticated")
-		return
-	}
+// Data structures for audit logging and notifications
 
-	teams, err := h.teamService.GetUserTeams(userID)
-	if err != nil {
-		utils.InternalServerErrorResponse(c, "Failed to get teams", err)
-		return
-	}
-
-	utils.SuccessResponse(c, http.StatusOK, "Teams retrieved successfully", teams)
+type TeamAuditLog struct {
+	ID          uint                   `gorm:"primaryKey"`
+	TeamID      uuid.UUID              `gorm:"not null;index"`
+	EventType   string                 `gorm:"not null"`
+	PerformedBy uuid.UUID              `gorm:"not null"`
+	Details     map[string]interface{} `gorm:"type:jsonb"`
+	Timestamp   time.Time              `gorm:"not null"`
+	CreatedAt   time.Time              `gorm:"autoCreateTime"`
 }
+
+type NotificationRequest struct {
+	Type      string
+	TeamID    uuid.UUID
+	UserID    uuid.UUID
+	Message   string
+	Timestamp time.Time
+}
+
+type Notification struct {
+	ID        uint      `gorm:"primaryKey"`
+	Type      string    `gorm:"not null"`
+	TeamID    uuid.UUID `gorm:"index"`
+	UserID    uuid.UUID `gorm:"not null;index"`
+	Message   string    `gorm:"not null"`
+	Read      bool      `gorm:"default:false"`
+	CreatedAt time.Time `gorm:"autoCreateTime"`
+}
+
+// Add these imports at the top
+import (
+	"fmt"
+	"github.com/google/uuid"
+)

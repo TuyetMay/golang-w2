@@ -12,6 +12,7 @@ type Config struct {
 	Server   ServerConfig
 	Database DatabaseConfig
 	JWT      JWTConfig
+	Kafka    KafkaConfig // NEW: Added Kafka configuration
 }
 
 type ServerConfig struct {
@@ -32,6 +33,18 @@ type DatabaseConfig struct {
 type JWTConfig struct {
 	SecretKey      string
 	ExpirationTime time.Duration
+}
+
+// NEW: Kafka configuration struct
+type KafkaConfig struct {
+	Enabled               bool
+	Brokers               []string
+	ProducerRetryMax      int
+	ProducerRequiredAcks  int
+	ProducerFlushTimeout  time.Duration
+	ConsumerGroupID       string
+	ConsumerSessionTimeout time.Duration
+	AutoCommitInterval    time.Duration
 }
 
 func Load() (*Config, error) {
@@ -55,6 +68,17 @@ func Load() (*Config, error) {
 		JWT: JWTConfig{
 			SecretKey:      getEnv("JWT_SECRET", "your-super-secret-key-change-in-production"),
 			ExpirationTime: getDurationEnv("JWT_EXPIRATION", 24*time.Hour),
+		},
+		// NEW: Kafka configuration
+		Kafka: KafkaConfig{
+			Enabled:               getBoolEnv("KAFKA_ENABLED", true),
+			Brokers:               getSliceEnv("KAFKA_BROKERS", []string{"localhost:9092"}),
+			ProducerRetryMax:      getIntEnv("KAFKA_PRODUCER_RETRY_MAX", 3),
+			ProducerRequiredAcks:  getIntEnv("KAFKA_PRODUCER_REQUIRED_ACKS", 1),
+			ProducerFlushTimeout:  getDurationEnv("KAFKA_PRODUCER_FLUSH_TIMEOUT", 5*time.Second),
+			ConsumerGroupID:       getEnv("KAFKA_CONSUMER_GROUP_ID", "asset-management-api"),
+			ConsumerSessionTimeout: getDurationEnv("KAFKA_CONSUMER_SESSION_TIMEOUT", 30*time.Second),
+			AutoCommitInterval:    getDurationEnv("KAFKA_CONSUMER_AUTO_COMMIT_INTERVAL", 1*time.Second),
 		},
 	}
 
@@ -85,3 +109,44 @@ func getIntEnv(key string, defaultValue int) int {
 	}
 	return defaultValue
 }
+
+// NEW: Helper function for boolean environment variables
+func getBoolEnv(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		if boolValue, err := strconv.ParseBool(value); err == nil {
+			return boolValue
+		}
+	}
+	return defaultValue
+}
+
+// NEW: Helper function for slice environment variables
+func getSliceEnv(key string, defaultValue []string) []string {
+	if value := os.Getenv(key); value != "" {
+		// Split by comma and trim spaces
+		var result []string
+		for _, v := range splitAndTrim(value, ",") {
+			if v != "" {
+				result = append(result, v)
+			}
+		}
+		if len(result) > 0 {
+			return result
+		}
+	}
+	return defaultValue
+}
+
+// Helper function to split and trim strings
+func splitAndTrim(s, sep string) []string {
+	parts := make([]string, 0)
+	for _, part := range strings.Split(s, sep) {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return parts
+}
+
+// Add this import at the top of the file
+import "strings"
