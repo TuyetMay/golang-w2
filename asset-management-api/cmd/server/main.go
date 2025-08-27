@@ -1,6 +1,8 @@
 package main
 
 import (
+	"asset-management-api/internal/cache"
+	redisCache "asset-management-api/internal/cache/redis"
 	"asset-management-api/internal/config"
 	"asset-management-api/internal/database"
 	"asset-management-api/internal/events/kafka"
@@ -10,6 +12,7 @@ import (
 	"asset-management-api/internal/service"
 	"asset-management-api/internal/utils"
 	"asset-management-api/pkg/eventbus"
+	cacheInterface "asset-management-api/pkg/cache"
 
 	"context"
 	"log"
@@ -46,8 +49,28 @@ func main() {
 	// Initialize JWT utility
 	jwtUtil := utils.NewJWTUtil(cfg.JWT.SecretKey, cfg.JWT.ExpirationTime)
 
-	// NEW: Initialize Kafka event bus if enabled
+	// NEW: Initialize Redis cache if enabled
+	var cacheService cacheInterface.CacheService
+	if cfg.Redis.Enabled {
+		cacheService, err = initializeRedisCache(&cfg.Redis)
+		if err != nil {
+			log.Printf("Failed to initialize Redis cache: %v, continuing without cache", err)
+			cacheService = &noOpCacheService{} // Fallback to no-op implementation
+		} else {
+			middleware.LogInfo("Redis cache initialized successfully", map[string]interface{}{
+				"host": cfg.Redis.Host,
+				"port": cfg.Redis.Port,
+				"database": cfg.Redis.Database,
+			})
+		}
+	} else {
+		log.Println("Redis cache disabled, using no-op cache service")
+		cacheService = &noOpCacheService{}
+	}
+
+	// Initialize Kafka event bus if enabled
 	var eventBus eventbus.EventBus
+	var cacheEventHandler *cache.CacheEventHandler
 	if cfg.Kafka.Enabled {
 		eventBus, err = initializeKafka(cfg)
 		if err != nil {
@@ -58,6 +81,12 @@ func main() {
 				"brokers": cfg.Kafka.Brokers,
 				"group_id": cfg.Kafka.ConsumerGroupID,
 			})
+			
+			// NEW: Initialize cache event handler and subscribe to events
+			cacheEventHandler = cache.NewCacheEventHandler(cacheService)
+			if err := subscribeToEvents(eventBus, cacheEventHandler); err != nil {
+				log.Printf("Failed to subscribe to events: %v", err)
+			}
 		}
 	} else {
 		log.Println("Kafka disabled, using no-op event bus")
@@ -71,7 +100,7 @@ func main() {
 	userRepo := postgres.NewUserRepository(db)
 	teamRepo := postgres.NewTeamRepository(db)
 
-	// NEW: Initialize services with event bus
+	// Initialize services with event bus and cache
 	folderService := service.NewFolderService(folderRepo, shareRepo, eventBus)
 	noteService := service.NewNoteService(noteRepo, folderRepo, shareRepo, eventBus)
 	shareService := service.NewShareService(shareRepo, folderRepo, noteRepo, userRepo, eventBus)
@@ -89,7 +118,7 @@ func main() {
 	authMiddleware := middleware.NewAuthMiddleware(jwtUtil)
 
 	// Setup Gin router
-	router := setupRouter(folderHandler, noteHandler, shareHandler, managerHandler, teamHandler, authMiddleware, jwtUtil)
+	router := setupRouter(folderHandler, noteHandler, shareHandler, managerHandler, teamHandler, authMiddleware, jwtUtil, cacheService)
 
 	// Create HTTP server
 	server := &http.Server{
@@ -110,6 +139,7 @@ func main() {
 			"environment": gin.Mode(),
 			"version":     "1.0.0",
 			"kafka_enabled": cfg.Kafka.Enabled,
+			"redis_enabled": cfg.Redis.Enabled,
 		})
 
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -143,10 +173,66 @@ func main() {
 		}
 	}
 
+	// NEW: Close cache service
+	if cacheService != nil {
+		if err := cacheService.Close(); err != nil {
+			log.Printf("Error closing cache service: %v", err)
+		}
+	}
+
 	log.Println("Server exited")
 }
 
-// NEW: Initialize Kafka event bus
+// NEW: Initialize Redis cache
+func initializeRedisCache(cfg *config.RedisConfig) (cacheInterface.CacheService, error) {
+	// Convert config to Redis config
+	redisConfig := &redisCache.RedisConfig{
+		Host:               cfg.Host,
+		Port:               cfg.Port,
+		Password:           cfg.Password,
+		Database:           cfg.Database,
+		PoolSize:           cfg.PoolSize,
+		MinIdleConns:       cfg.MinIdleConns,
+		MaxRetries:         cfg.MaxRetries,
+		RetryDelay:         cfg.RetryDelay,
+		PoolTimeout:        cfg.PoolTimeout,
+		IdleTimeout:        cfg.IdleTimeout,
+		IdleCheckFrequency: cfg.IdleCheckFrequency,
+		MaxConnAge:         cfg.MaxConnAge,
+		ReadTimeout:        cfg.ReadTimeout,
+		WriteTimeout:       cfg.WriteTimeout,
+		DialTimeout:        cfg.DialTimeout,
+	}
+
+	// Create Redis client
+	redisClient, err := redisCache.NewRedisClient(redisConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create cache service
+	return redisCache.NewRedisCacheService(redisClient), nil
+}
+
+// NEW: Subscribe to Kafka events for cache invalidation
+func subscribeToEvents(eventBus eventbus.EventBus, handler *cache.CacheEventHandler) error {
+	ctx := context.Background()
+	
+	// Subscribe to team events
+	if err := eventBus.Subscribe(ctx, "team.activity", handler.HandleTeamEvent); err != nil {
+		return fmt.Errorf("failed to subscribe to team events: %w", err)
+	}
+	
+	// Subscribe to asset events
+	if err := eventBus.Subscribe(ctx, "asset.changes", handler.HandleAssetEvent); err != nil {
+		return fmt.Errorf("failed to subscribe to asset events: %w", err)
+	}
+	
+	log.Println("Successfully subscribed to Kafka events for cache invalidation")
+	return nil
+}
+
+// Initialize Kafka event bus
 func initializeKafka(cfg *config.Config) (eventbus.EventBus, error) {
 	// Create Kafka configuration
 	kafkaConfig := &kafka.KafkaConfig{
@@ -189,11 +275,32 @@ func initializeKafka(cfg *config.Config) (eventbus.EventBus, error) {
 	return producer, nil
 }
 
-// NEW: No-op event bus for fallback
+// NEW: No-op cache service for fallback
+type noOpCacheService struct{}
+
+func (n *noOpCacheService) CacheTeamMembers(ctx context.Context, teamID uuid.UUID, members []uuid.UUID) error { return nil }
+func (n *noOpCacheService) GetTeamMembers(ctx context.Context, teamID uuid.UUID) ([]uuid.UUID, error) { return nil, nil }
+func (n *noOpCacheService) AddTeamMember(ctx context.Context, teamID, memberID uuid.UUID) error { return nil }
+func (n *noOpCacheService) RemoveTeamMember(ctx context.Context, teamID, memberID uuid.UUID) error { return nil }
+func (n *noOpCacheService) InvalidateTeamMembers(ctx context.Context, teamID uuid.UUID) error { return nil }
+func (n *noOpCacheService) CacheFolderMetadata(ctx context.Context, folder *models.Folder) error { return nil }
+func (n *noOpCacheService) GetFolderMetadata(ctx context.Context, folderID uuid.UUID) (*models.Folder, error) { return nil, nil }
+func (n *noOpCacheService) CacheNoteMetadata(ctx context.Context, note *models.Note) error { return nil }
+func (n *noOpCacheService) GetNoteMetadata(ctx context.Context, noteID uuid.UUID) (*models.Note, error) { return nil, nil }
+func (n *noOpCacheService) InvalidateFolderMetadata(ctx context.Context, folderID uuid.UUID) error { return nil }
+func (n *noOpCacheService) InvalidateNoteMetadata(ctx context.Context, noteID uuid.UUID) error { return nil }
+func (n *noOpCacheService) CacheAssetACL(ctx context.Context, assetID uuid.UUID, acl map[string]string) error { return nil }
+func (n *noOpCacheService) GetAssetACL(ctx context.Context, assetID uuid.UUID) (map[string]string, error) { return nil, nil }
+func (n *noOpCacheService) UpdateAssetACL(ctx context.Context, assetID, userID uuid.UUID, accessLevel string) error { return nil }
+func (n *noOpCacheService) RemoveAssetACL(ctx context.Context, assetID, userID uuid.UUID) error { return nil }
+func (n *noOpCacheService) InvalidateAssetACL(ctx context.Context, assetID uuid.UUID) error { return nil }
+func (n *noOpCacheService) HealthCheck() map[string]interface{} { return map[string]interface{}{"status": "disabled"} }
+func (n *noOpCacheService) Close() error { return nil }
+
+// No-op event bus for fallback
 type noOpEventBus struct{}
 
 func (n *noOpEventBus) Publish(ctx context.Context, topic string, event interface{}) error {
-	// Log the event that would have been published
 	log.Printf("No-op event bus: would publish to topic %s: %+v", topic, event)
 	return nil
 }
@@ -212,9 +319,10 @@ func setupRouter(
 	noteHandler *handler.NoteHandler,
 	shareHandler *handler.ShareHandler,
 	managerHandler *handler.ManagerHandler,
-	teamHandler *handler.TeamHandler, // NEW: Added team handler
+	teamHandler *handler.TeamHandler,
 	authMiddleware *middleware.AuthMiddleware,
 	jwtUtil *utils.JWTUtil,
+	cacheService cacheInterface.CacheService, // NEW: Added cache service
 ) *gin.Engine {
 	// Set Gin mode
 	gin.SetMode(gin.ReleaseMode)
@@ -223,9 +331,9 @@ func setupRouter(
 
 	// Global middleware - Order matters!
 	router.Use(middleware.RecoveryMiddleware())
-	router.Use(middleware.StructuredLoggingMiddleware()) // Replace default Gin logger
-	router.Use(middleware.RequestResponseLoggingMiddleware()) // Detailed logging
-	router.Use(middleware.PrometheusMiddleware()) // Metrics collection
+	router.Use(middleware.StructuredLoggingMiddleware())
+	router.Use(middleware.RequestResponseLoggingMiddleware())
+	router.Use(middleware.PrometheusMiddleware())
 	router.Use(middleware.CORSMiddleware())
 	router.Use(middleware.SecurityMiddleware())
 
@@ -239,6 +347,7 @@ func setupRouter(
 			"service":   "asset-management-api",
 			"version":   "1.0.0",
 			"status":    "healthy",
+			"cache":     cacheService.HealthCheck(), // NEW: Include cache health
 		}
 
 		middleware.LogInfo("Health check performed", map[string]interface{}{
@@ -316,7 +425,7 @@ func setupRouter(
 			notes.GET("/:noteId/shares", enhanceHandler(shareHandler.GetNoteShares, "get_note_shares"))
 		}
 
-		// NEW: Team management routes
+		// Team management routes
 		teams := v1.Group("/teams")
 		{
 			teams.POST("", enhanceHandler(teamHandler.CreateTeam, "create_team"))
@@ -402,7 +511,7 @@ func enhanceHandler(handler gin.HandlerFunc, operation string) gin.HandlerFunc {
 			}
 		case "share_folder":
 			if c.Writer.Status() < 400 {
-				middleware.RecordShareCreated("folder", "unknown") // You can extract access level from request
+				middleware.RecordShareCreated("folder", "unknown")
 			}
 		case "share_note":
 			if c.Writer.Status() < 400 {

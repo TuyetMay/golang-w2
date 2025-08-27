@@ -1,6 +1,30 @@
 version: '3.8'
 
 services:
+  # NEW: Redis for caching
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    networks:
+      - asset_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
   # Zookeeper for Kafka
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
@@ -135,7 +159,7 @@ services:
       - JWT_SECRET=your-super-secret-jwt-key-change-in-production-make-it-long-and-random
       - JWT_EXPIRATION=24h
       - GIN_MODE=release
-      # NEW: Kafka configuration
+      # Kafka configuration
       - KAFKA_ENABLED=true
       - KAFKA_BROKERS=kafka:29092
       - KAFKA_CONSUMER_GROUP_ID=asset-management-api
@@ -144,11 +168,29 @@ services:
       - KAFKA_PRODUCER_FLUSH_TIMEOUT=5s
       - KAFKA_CONSUMER_SESSION_TIMEOUT=30s
       - KAFKA_CONSUMER_AUTO_COMMIT_INTERVAL=1s
+      # NEW: Redis configuration
+      - REDIS_ENABLED=true
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - REDIS_DATABASE=0
+      - REDIS_POOL_SIZE=10
+      - REDIS_MIN_IDLE_CONNS=5
+      - REDIS_MAX_RETRIES=3
+      - REDIS_RETRY_DELAY=100ms
+      - REDIS_POOL_TIMEOUT=4s
+      - REDIS_IDLE_TIMEOUT=5m
+      - REDIS_IDLE_CHECK_FREQUENCY=1m
+      - REDIS_READ_TIMEOUT=3s
+      - REDIS_WRITE_TIMEOUT=3s
+      - REDIS_DIAL_TIMEOUT=5s
     depends_on:
       kafka:
         condition: service_healthy
       postgres:
         condition: service_started
+      redis:
+        condition: service_healthy
     networks:
       - asset_network
     volumes:
@@ -183,12 +225,17 @@ services:
       - KAFKA_CONSUMER_GROUP_ID=asset-event-consumer
       - KAFKA_CONSUMER_SESSION_TIMEOUT=30s
       - KAFKA_CONSUMER_AUTO_COMMIT_INTERVAL=1s
+      - REDIS_ENABLED=true
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     command: ["./event-consumer"] # This would be a separate binary for consuming events
     depends_on:
       kafka:
         condition: service_healthy
       postgres:
         condition: service_started
+      redis:
+        condition: service_healthy
     networks:
       - asset_network
     volumes:
@@ -223,7 +270,6 @@ services:
       - ./monitoring/promtail:/etc/promtail
       - /var/log:/var/log:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./logs:/app/logs:ro
     command: -config.file=/etc/promtail/promtail-config.yml
     networks:
@@ -274,10 +320,10 @@ volumes:
   loki_data:
   grafana_data:
   prometheus_data:
-  # NEW: Kafka volumes
   kafka_data:
   zookeeper_data:
   zookeeper_logs:
+  redis_data: # NEW: Redis data volume
 
 networks:
   asset_network:

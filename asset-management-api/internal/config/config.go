@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -12,7 +13,8 @@ type Config struct {
 	Server   ServerConfig
 	Database DatabaseConfig
 	JWT      JWTConfig
-	Kafka    KafkaConfig // NEW: Added Kafka configuration
+	Kafka    KafkaConfig
+	Redis    RedisConfig // NEW: Added Redis configuration
 }
 
 type ServerConfig struct {
@@ -35,7 +37,6 @@ type JWTConfig struct {
 	ExpirationTime time.Duration
 }
 
-// NEW: Kafka configuration struct
 type KafkaConfig struct {
 	Enabled               bool
 	Brokers               []string
@@ -45,6 +46,26 @@ type KafkaConfig struct {
 	ConsumerGroupID       string
 	ConsumerSessionTimeout time.Duration
 	AutoCommitInterval    time.Duration
+}
+
+// NEW: Redis configuration struct
+type RedisConfig struct {
+	Enabled            bool
+	Host               string
+	Port               string
+	Password           string
+	Database           int
+	PoolSize           int
+	MinIdleConns       int
+	MaxRetries         int
+	RetryDelay         time.Duration
+	PoolTimeout        time.Duration
+	IdleTimeout        time.Duration
+	IdleCheckFrequency time.Duration
+	MaxConnAge         time.Duration
+	ReadTimeout        time.Duration
+	WriteTimeout       time.Duration
+	DialTimeout        time.Duration
 }
 
 func Load() (*Config, error) {
@@ -69,7 +90,6 @@ func Load() (*Config, error) {
 			SecretKey:      getEnv("JWT_SECRET", "your-super-secret-key-change-in-production"),
 			ExpirationTime: getDurationEnv("JWT_EXPIRATION", 24*time.Hour),
 		},
-		// NEW: Kafka configuration
 		Kafka: KafkaConfig{
 			Enabled:               getBoolEnv("KAFKA_ENABLED", true),
 			Brokers:               getSliceEnv("KAFKA_BROKERS", []string{"localhost:9092"}),
@@ -79,6 +99,25 @@ func Load() (*Config, error) {
 			ConsumerGroupID:       getEnv("KAFKA_CONSUMER_GROUP_ID", "asset-management-api"),
 			ConsumerSessionTimeout: getDurationEnv("KAFKA_CONSUMER_SESSION_TIMEOUT", 30*time.Second),
 			AutoCommitInterval:    getDurationEnv("KAFKA_CONSUMER_AUTO_COMMIT_INTERVAL", 1*time.Second),
+		},
+		// NEW: Redis configuration
+		Redis: RedisConfig{
+			Enabled:            getBoolEnv("REDIS_ENABLED", true),
+			Host:               getEnv("REDIS_HOST", "localhost"),
+			Port:               getEnv("REDIS_PORT", "6379"),
+			Password:           getEnv("REDIS_PASSWORD", ""),
+			Database:           getIntEnv("REDIS_DATABASE", 0),
+			PoolSize:           getIntEnv("REDIS_POOL_SIZE", 10),
+			MinIdleConns:       getIntEnv("REDIS_MIN_IDLE_CONNS", 5),
+			MaxRetries:         getIntEnv("REDIS_MAX_RETRIES", 3),
+			RetryDelay:         getDurationEnv("REDIS_RETRY_DELAY", 100*time.Millisecond),
+			PoolTimeout:        getDurationEnv("REDIS_POOL_TIMEOUT", 4*time.Second),
+			IdleTimeout:        getDurationEnv("REDIS_IDLE_TIMEOUT", 5*time.Minute),
+			IdleCheckFrequency: getDurationEnv("REDIS_IDLE_CHECK_FREQUENCY", 1*time.Minute),
+			MaxConnAge:         getDurationEnv("REDIS_MAX_CONN_AGE", 0),
+			ReadTimeout:        getDurationEnv("REDIS_READ_TIMEOUT", 3*time.Second),
+			WriteTimeout:       getDurationEnv("REDIS_WRITE_TIMEOUT", 3*time.Second),
+			DialTimeout:        getDurationEnv("REDIS_DIAL_TIMEOUT", 5*time.Second),
 		},
 	}
 
@@ -110,7 +149,6 @@ func getIntEnv(key string, defaultValue int) int {
 	return defaultValue
 }
 
-// NEW: Helper function for boolean environment variables
 func getBoolEnv(key string, defaultValue bool) bool {
 	if value := os.Getenv(key); value != "" {
 		if boolValue, err := strconv.ParseBool(value); err == nil {
@@ -120,10 +158,8 @@ func getBoolEnv(key string, defaultValue bool) bool {
 	return defaultValue
 }
 
-// NEW: Helper function for slice environment variables
 func getSliceEnv(key string, defaultValue []string) []string {
 	if value := os.Getenv(key); value != "" {
-		// Split by comma and trim spaces
 		var result []string
 		for _, v := range splitAndTrim(value, ",") {
 			if v != "" {
@@ -137,7 +173,6 @@ func getSliceEnv(key string, defaultValue []string) []string {
 	return defaultValue
 }
 
-// Helper function to split and trim strings
 func splitAndTrim(s, sep string) []string {
 	parts := make([]string, 0)
 	for _, part := range strings.Split(s, sep) {
@@ -147,6 +182,3 @@ func splitAndTrim(s, sep string) []string {
 	}
 	return parts
 }
-
-// Add this import at the top of the file
-import "strings"
